@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM Template for zero-penny-serverless-blog
+
+Globals:
+  Function:
+    Handler: app.lambdaHandler
+    MemorySize: 128
+    Runtime: nodejs16.x
+    Timeout: 10
+
+Resources:
+
+  ArticlesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: articleId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: articleId
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  CommentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: articleId
+          AttributeType: S
+        - AttributeName: commentId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: articleId
+          KeyType: HASH
+        - AttributeName: commentId
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  SubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: followerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: followerId
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Ref AWS::StackName
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+      UsernameAttributes:
+        - email
+
+  WebApp:
+    Type: AWS::Serverless::Function
+    Properties:
+      Architectures:
+        - arm64
+      CodeUri: lambdas/web-app/
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+
+  ArticleMS:
+    Type: AWS::Serverless::Function
+    Properties:
+      Architectures:
+        - arm64
+      CodeUri: lambdas/article-ms/
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ArticlesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CommentsTable
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+      Environment:
+        Variables:
+          ARTICLES_TABLE: !Ref ArticlesTable
+          COMMENTS_TABLE: !Ref CommentsTable
+
+  SubscriptionMS:
+    Type: AWS::Serverless::Function
+    Properties:
+      Architectures:
+        - arm64
+      CodeUri: lambdas/subscription-ms/
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SubscriptionsTable
+        - SESBulkTemplatedCrudPolicy:
+            IdentityName: "*"
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+      Environment:
+        Variables:
+          SUBSCRIPTIONS_TABLE: !Ref SubscriptionsTable
+
+  EdgeSigner:
+    Type: AWS::Serverless::Function
+    Properties:
+      Architectures:
+        - x86_64
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowLambdaServiceToAssumeRole"
+            Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+                - "edgelambda.amazonaws.com"
+      AutoPublishAlias: live
+      CodeUri: lambdas/edge-signer/
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunctionUrl
+              Resource:
+                - !GetAtt WebApp.Arn
+                - !GetAtt ArticleMS.Arn
+                - !GetAtt SubscriptionMS.Arn
+
+  CDN:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        IPV6Enabled: true
+        Comment: Distribution with Lambda Function URL
+        Origins:
+          - DomainName:
+              !Select [2, !Split ["/", !GetAtt WebAppUrl.FunctionUrl]]
+            Id: WebAppOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+          - DomainName:
+              !Select [2, !Split ["/", !GetAtt ArticleMSUrl.FunctionUrl]]
+            Id: ArticleMSOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+          - DomainName:
+              !Select [2, !Split ["/", !GetAtt SubscriptionMSUrl.FunctionUrl]]
+            Id: SubscriptionMSOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: WebAppOrigin
+          CachePolicyId: "2e54312d-136d-493c-8eb9-b001f22f67d2"
+          ViewerProtocolPolicy: redirect-to-https
+          LambdaFunctionAssociations:
+            - EventType: origin-request
+              LambdaFunctionARN: !Ref EdgeSigner.Version
+              IncludeBody: true
+          SmoothStreaming: false
+          Compress: true
+        CacheBehaviors:
+          - AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            PathPattern: /api/articles*
+            TargetOriginId: ArticleMSOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            LambdaFunctionAssociations:
+              - EventType: origin-request
+                LambdaFunctionARN: !Ref EdgeSigner.Version
+                IncludeBody: true
+            SmoothStreaming: false
+            Compress: true
+          - AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - PATCH
+              - POST
+              - DELETE
+            CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+            PathPattern: /api/subscriptions*
+            TargetOriginId: SubscriptionMSOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            LambdaFunctionAssociations:
+              - EventType: origin-request
+                LambdaFunctionARN: !Ref EdgeSigner.Version
+                IncludeBody: true
+            SmoothStreaming: false
+            Compress: true
