@@ -9,7 +9,11 @@
     "postinstall": "nuxt prepare"
   },
   "devDependencies": {
+    "@nuxtjs/tailwindcss": "^6.6.5",
     "@types/node": "^18.15.11",
-    "nuxt": "^3.3.3"
+    "autoprefixer": "^10.4.14",
+    "nuxt": "^3.3.3",
+    "postcss": "^8.4.21",
+    "tailwindcss": "^3.3.1"
   }
 }
